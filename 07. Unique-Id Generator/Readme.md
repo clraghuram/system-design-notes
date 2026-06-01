@@ -10,7 +10,7 @@ This chapter addresses the challenge of designing a **unique ID generator** for 
 
 ## Step 1: Understanding the Problem
 ### Basic Requirements
-- IDs must be unique and numerical and should fit in 64 bi.
+- IDs must be unique and numerical and should fit in 64 bits.
 - IDs increment with time but not strictly by `+1`.
 - IDs should be sortable by date.
 - System must handle high throughput (10,000 IDs/sec).
