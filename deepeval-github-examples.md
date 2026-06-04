@@ -14,44 +14,66 @@
 
 ### How DeepEval Tracks Latency
 
-DeepEval does NOT have a standalone "latency metric" that scores pass/fail by response time, but it provides two hooks:
+DeepEval provides **three** latency mechanisms — choose based on whether you need unit-test assertions, observability traces, or load testing:
 
-**a) `completion_time` on `LLMTestCase`** — log elapsed seconds per interaction:
+**a) `LatencyMetric` + `LLMTestCase(latency=N)` — hard pass/fail assertion:**
 
 ```python
 import time
+from deepeval import assert_test
 from deepeval.test_case import LLMTestCase
+from deepeval.metrics import LatencyMetric
 
-start = time.time()
-output = your_llm(input_prompt)
-elapsed = time.time() - start
+start = time.perf_counter()
+actual_output = your_llm(input_prompt)
+elapsed = time.perf_counter() - start
 
 test_case = LLMTestCase(
     input=input_prompt,
-    actual_output=output,
-    completion_time=elapsed   # seconds — logged to Confident AI dashboard
+    actual_output=actual_output,
+    latency=elapsed            # seconds as float
 )
+latency_metric = LatencyMetric(max_latency=7.0)   # FAILS if elapsed > 7s
+assert_test(test_case, [latency_metric])
 ```
 
-**b) `@trace` decorators** (added 2025) — token-level streaming timestamps on spans:
+> **Version note:** In DeepEval v3+, `LatencyMetric` may be removed from `deepeval.metrics`. Check `pip show deepeval` and the [changelog](https://github.com/confident-ai/deepeval/releases). The fallback is a custom `BaseMetric` subclass that checks `test_case.latency`.
+
+**b) `@observe` decorator (tracing) — automatic per-span latency with zero app overhead:**
 
 ```python
-from deepeval.tracing import trace, TraceType
+from deepeval.tracing import observe, update_current_span
+from deepeval.test_case import LLMTestCase
+from deepeval.metrics import AnswerRelevancyMetric
 
-@trace(type=TraceType.LLM)
-def call_llm(prompt: str) -> str:
-    return openai_client.chat.completions.create(...)
+@observe()   # auto-records wall-clock latency for this span
+def rag_pipeline(user_query: str):
+    context = retrieve(user_query)
+    response = llm_generate(user_query, context)
+    update_current_span(
+        test_case=LLMTestCase(input=user_query, actual_output=response,
+                              retrieval_context=context),
+        metrics=[AnswerRelevancyMetric(threshold=0.7)]
+    )
+    return response
 ```
+
+Token-level streaming timestamps were added to trace spans in 2025 for fine-grained latency analysis. Docs: [deepeval.com/docs/evaluation-llm-tracing](https://deepeval.com/docs/evaluation-llm-tracing)
+
+**c) JMeter + DeepEval — load testing TTFT/TPOT at scale:**
+
+See [`canyonlabz/llm-perf-studio`](https://github.com/canyonlabz/llm-perf-studio) below.
 
 ### Best GitHub Examples — Latency & Response Testing
 
 | Repo | File | What it does |
 |------|------|--------------|
-| [`vudayani/DeepEvalTests`](https://github.com/vudayani/DeepEvalTests) | `tests/` + `main.py` | Exposes a `/evaluate` POST endpoint; records G-Eval accuracy score + reasoning for Copilot LLM responses. Demonstrates API-wrapping pattern for continuous latency + quality tracking. |
-| [`confident-ai/deepeval`](https://github.com/confident-ai/deepeval/blob/main/examples/tracing/test_chatbot.py) | `examples/tracing/test_chatbot.py` | Official chatbot tracing example using `@trace` decorators on LLM, embedding, retriever, and agent spans. HallucinationMetric at threshold=0.8. |
-| [`confident-ai/deepeval`](https://github.com/confident-ai/deepeval/blob/main/examples/getting_started/test_example.py) | `examples/getting_started/test_example.py` | Canonical quickstart: `AnswerRelevancyMetric` + `GEval` correctness, `EvaluationDataset`, `log_hyperparameters`. |
-| [`codemaker2015/deepeval-experiments`](https://github.com/codemaker2015/deepeval-experiments) | 12 experiment files | Hands-on coverage of AnswerRelevancy, G-Eval, Hallucination, Faithfulness, Multi-turn chatbot, LLM tracing, and MMLU benchmarks — each as a separate runnable test file. |
-| [`meteatamel/genai-beyond-basics`](https://github.com/meteatamel/genai-beyond-basics/blob/main/samples/evaluation/deepeval/rag_eval/test_rag_triad.py) | `rag_eval/test_rag_triad.py` | Google DevRel sample: RAG Triad (AnswerRelevancy, Faithfulness, ContextualRelevancy) against a live Vertex AI + Gemini backend. Uses `assert_test()` to fail CI on regressions. |
+| [`confident-ai/deepeval`](https://github.com/confident-ai/deepeval/blob/main/examples/getting_started/test_example.py) | `examples/getting_started/test_example.py` | Canonical quickstart: `AnswerRelevancyMetric` + `GEval` correctness; add `latency=elapsed` + `LatencyMetric(max_latency=N)` for latency assertion. |
+| [`canyonlabz/llm-perf-studio`](https://github.com/canyonlabz/llm-perf-studio) | `src/services/` | **Best latency + quality combo**: Apache JMeter measures TTFT (Time To First Token) and TPOT (Time Per Output Token) under load; DeepEval scores correctness in the same pipeline. Supports Ollama + OpenAI backends. |
+| [`confident-ai/deepeval`](https://github.com/confident-ai/deepeval/blob/main/examples/tracing/test_chatbot.py) | `examples/tracing/test_chatbot.py` | Official chatbot tracing with `@observe` / `@trace` decorators on LLM, embedding, retriever, and agent spans. HallucinationMetric at threshold=0.8. |
+| [`vudayani/DeepEvalTests`](https://github.com/vudayani/DeepEvalTests) | `tests/` + `main.py` | REST `/evaluate` POST endpoint; G-Eval accuracy + AnswerRelevancyMetric for Copilot LLM responses. API-wrapping pattern for continuous quality + latency tracking. |
+| [`codemaker2015/deepeval-experiments`](https://github.com/codemaker2015/deepeval-experiments) | 12 experiment files | 12 runnable test files covering AnswerRelevancy, G-Eval, Hallucination, Faithfulness, Multi-turn chatbot, LLM tracing, and MMLU benchmarks. |
+| [`meteatamel/genai-beyond-basics`](https://github.com/meteatamel/genai-beyond-basics/blob/main/samples/evaluation/deepeval/rag_eval/test_rag_triad.py) | `rag_eval/test_rag_triad.py` | Google DevRel sample: RAG Triad against a live Vertex AI + Gemini backend; `assert_test()` fails CI on quality regressions. |
 
 ---
 
